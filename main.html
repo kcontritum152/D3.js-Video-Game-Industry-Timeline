@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+
+<html>
+    <head>
+        <script src="https://d3js.org/d3.v6.min.js"></script>
+        <style>
+            body { 
+                font-family: sans-serif; 
+                margin: 20px; 
+            }
+            svg { 
+                border: 1px solid #ccc; 
+            }
+        </style>
+    </head>
+
+    <body>
+        <div class="container">
+            <div id="controls"></div>
+            <div id="timeline"></div>
+        </div>
+
+        <div id="decade-summary"></div>
+        <div id="decade-breakdown"></div>
+
+        <script>
+            const margin = {
+                top: 40,
+                right: 40,
+                bottom: 60,
+                left: 80
+            }
+
+            const width = 1400 - margin.left - margin.right
+            const height = 500 - margin.top - margin.bottom
+
+            const controls = d3.select("#controls")
+
+            controls.append("div")
+                .attr("class", "chart-controls")
+                .style("margin-bottom", "10px")
+                .html(`
+                    <label for="chartSelector" style="font-weight: bold;">Chart View:</label>
+                    <select id="chartSelector" style="margin-left: 10px;">
+                    <option value="cumulative">Total Revenue Over Time (Cumulative)</option>
+                    <option value="yearly">Year-by-Year Revenue Breakdown</option>
+                    </select>
+                `)
+
+            controls.append("div")
+                .attr("class", "warning")
+                .style("color", "crimson")
+                .style("font-size", "14px")
+                .style("margin-bottom", "10px")
+                .text("Warning: Revenue figures are estimated which can lead to inflation in the data. Certain years may be underreported due to missing data.")
+
+            let rawDataGlobal = []  //store for reuse
+            let gBrandMap = {} //for reuse
+
+            d3.csv("vgchartz-7_7_2020.csv").then(rawData => {
+                rawDataGlobal = rawData
+                renderChart("cumulative", rawDataGlobal)
+            })
+
+            d3.select("#chartSelector").on("change", function () {
+                const selected = this.value
+                renderChart(selected, rawDataGlobal)
+            })
+
+            function renderChart(viewMode, rawData) {
+                d3.select("#timeline").selectAll("*").remove()  //clear previous SVG
+
+                const processedData = cleanDataset(rawData)
+
+                if (viewMode === "cumulative") {
+                    drawCumulativeChart(processedData)
+                } else if (viewMode === "yearly") {
+                    drawYearlyChart(processedData)
+                }
+            }
+
+            //Trigger on dropdown change
+            d3.select("#chartSelector").on("change", function () {
+                const selected = this.value
+                renderChart(selected, rawDataGlobal)
+            })
+
+            function drawCumulativeChart(data) {
+
+                const years = d3.range(1971, 2021)
+                const stackKeys = [...new Set(data.map(d => d.brand))]
+
+                //Aggregate revenue by year and brand
+                const dataByYearBrand = d3.rollup(
+                    data,
+                    v => d3.sum(v, d => d.assumed_revenue_generated),
+                    d => d.release_year,
+                    d => d.brand
+                )
+
+                //Construct cumulative revenue tracker
+                let cumulativeTracker = Object.fromEntries(stackKeys.map(k => [k, 0]))
+                const stackedData = years.map(year => {
+                    const yearData = { year }
+                    stackKeys.forEach(brand => {
+                    const current = dataByYearBrand.get(year)?.get(brand) || 0
+                    cumulativeTracker[brand] += current
+                    yearData[brand] = cumulativeTracker[brand]
+                    })
+                    return yearData
+                })
+
+                const brandColor = d3.scaleOrdinal()//turn to own function when time
+                .domain([
+                    'Nintendo', 'Sony', 'Microsoft',
+                    'PC', 'Mobile', 'Apple',
+                    'Cartridge', 'Other'
+                ])
+                .range([
+                    '#E60012', '#003791', '#107C10',
+                    '#800080', '#FFA500', '#A9A9A9',
+                    '#444444', '#008080'
+                ])
+
+                const stack = d3.stack()
+                    .keys(stackKeys)
+                const series = stack(stackedData)
+
+                const x = d3.scaleBand()
+                    .domain(years)
+                    .range([0, width])
+                    .padding(0.1)
+
+                const y = d3.scaleLinear()
+                    .domain([
+                    0,
+                    d3.max(stackedData, d =>
+                        stackKeys.reduce((sum, key) => sum + d[key], 0)
+                    )
+                    ])
+                    .nice()
+                    .range([height, 0])
+
+                const svg = d3.select("#timeline")
+                    .append("svg")
+                    .attr("width", width + margin.left + margin.right)
+                    .attr("height", height + margin.top + margin.bottom)
+                    .append("g")
+                    .attr("transform", `translate(${margin.left},${margin.top})`)
+
+                svg.append("g")
+                    .selectAll("g")
+                    .data(series)
+                    .enter()
+                    .append("g")
+                    .attr("fill", d => brandColor(d.key))
+                    .selectAll("rect")
+                    .data(d => d)
+                    .enter()
+                    .append("rect")
+                    .attr("x", d => x(d.data.year))
+                    .attr("y", d => y(d[1]))
+                    .attr("height", d => y(d[0]) - y(d[1]))
+                    .attr("width", x.bandwidth())
+
+                // X Axis
+                svg.append("g")
+                    .attr("transform", `translate(0,${height})`)
+                    .call(d3.axisBottom(x).tickValues(years).tickFormat(d => d))
+                    .selectAll("text")
+                    .attr("transform", "rotate(-60)")
+                    .style("text-anchor", "end")
+
+                // Y Axis (right side)
+                svg.append("g")
+                    .attr("transform", `translate(${width}, 0)`)
+                    .call(d3.axisRight(y).ticks(10).tickFormat(d3.format("$.2s")))
+
+                // Y Axis Label
+                svg.append("text")
+                    .attr("x", width + 40)
+                    .attr("y", -20)
+                    .attr("text-anchor", "start")
+                    .style("font-weight", "bold")
+                    .text("Assumed Revenue ($ millions)")
+
+                // X Axis Label
+                svg.append("text")
+                    .attr("x", width / 2)
+                    .attr("y", height + 50)
+                    .attr("text-anchor", "middle")
+                    .style("font-weight", "bold")
+                    .text("Release Year")
+
+                // Legend (left)
+                const legend = svg.append("g")
+                    .attr("transform", `translate(${-margin.left + 10}, 0)`)
+
+                stackKeys.forEach((brand, i) => {
+                    const row = legend.append("g")
+                    .attr("transform", `translate(0, ${i * 20})`)
+
+                    row.append("rect")
+                    .attr("width", 15)  
+                    .attr("height", 15)
+                    .attr("fill", brandColor(brand))
+
+                    row.append("text")
+                    .attr("x", 20)
+                    .attr("y", 12)
+                    .text(brand)
+                    .style("font-size", "12px")
+                    .style("alignment-baseline", "middle")
+                })
+
+                addDecadeInteractions(data, svg, x, height, brandColor, rawDataGlobal, gBrandMap)
+
+            }
+
+
+            function drawYearlyChart(data) {
+                //console.log("Cleaned chart data:", data)
+
+                const years = d3.range(1971, 2021)
+                const dataByYearBrand = d3.rollup(
+                    data,
+                    v => d3.sum(v, d => d.assumed_revenue_generated),
+                    d => d.release_year,
+                    d => d.brand
+                )
+
+                const stackKeys = [...new Set(data.map(d => d.brand))]
+                const stackedData = years.map(year => {
+                const yearData = { year }
+                    stackKeys.forEach(key => {
+                        yearData[key] = dataByYearBrand.get(year)?.get(key) || 0
+                    })
+                    return yearData
+                })
+
+                const brandColor = d3.scaleOrdinal()//turn to own function instead of doing this twice
+                .domain([
+                    'Nintendo', 'Sony', 'Microsoft',
+                    'PC', 'Mobile', 'Apple',
+                    'Cartridge', 'Other'
+                ])
+                .range([
+                    '#E60012', '#003791', '#107C10',
+                    '#800080', '#FFA500', '#A9A9A9',
+                    '#444444', '#008080'
+                ])
+
+                const stack = d3.stack()
+                .keys(stackKeys)
+                const series = stack(stackedData)
+
+                const x = d3.scaleBand()
+                            .domain(years) // [1971, ..., 2020]
+                            .range([0, width])
+                            .padding(0.1)
+
+                const y = d3.scaleLinear()
+                            .domain([0, d3.max(stackedData, d =>
+                                stackKeys.reduce((sum, key) => sum + d[key], 0)
+                            )])
+                            .nice()
+                            .range([height, 0])
+
+                const svg = d3.select("#timeline")
+                .append("svg")
+                .attr("width", width + margin.left + margin.right)
+                .attr("height", height + margin.top + margin.bottom)
+                .append("g")
+                .attr("transform", `translate(${margin.left},${margin.top})`)
+
+                svg.append("g")
+                .selectAll("g")
+                .data(series)
+                .enter()
+                .append("g")
+                .attr("fill", d => brandColor(d.key))
+                .selectAll("rect")
+                .data(d => d)
+                .enter()
+                .append("rect")
+                .attr("x", d => x(d.data.year))
+                .attr("y", d => y(d[1]))
+                .attr("height", d => y(d[0]) - y(d[1]))
+                .attr("width", x.bandwidth())
+
+                svg.append("g")
+                    .attr("transform", `translate(0,${height})`)
+                    .call(d3.axisBottom(x).tickValues(years).tickFormat(d => d))  // full year listing
+                    .selectAll("text")
+                    .attr("transform", "rotate(-60)")  // tilt for clarity
+                    .style("text-anchor", "end")
+
+                svg.append("g")
+                    .attr("transform", `translate(${width}, 0)`)
+                    .call(d3.axisRight(y).ticks(10).tickFormat(d3.format("$.2s")))
+
+                // Y-axis label
+                svg.append("text")
+                    .attr("x", width + 40)
+                    .attr("y", -20)
+                    .attr("text-anchor", "start")
+                    .style("font-weight", "bold")
+                    .text("Assumed Revenue ($ millions)")
+
+                // X-axis label
+                svg.append("text")
+                    .attr("x", width / 2)
+                    .attr("y", height + 50)
+                    .attr("text-anchor", "middle")
+                    .style("font-weight", "bold")
+                    .text("Release Year")
+
+                const legend = svg.append("g")
+                                .attr("transform", `translate(${-margin.left + 10}, 0)`)
+
+                stackKeys.forEach((brand, i) => {
+                const row = legend.append("g")
+                                .attr("transform", `translate(0, ${i * 20})`)
+
+                row.append("rect")
+                    .attr("width", 15)
+                    .attr("height", 15)
+                    .attr("fill", brandColor(brand))
+
+                row.append("text")
+                    .attr("x", 20)
+                    .attr("y", 12)
+                    .text(brand)
+                    .style("font-size", "12px")
+                    .style("alignment-baseline", "middle")
+                })
+
+                addDecadeInteractions(data, svg, x, height, brandColor, rawDataGlobal, gBrandMap)
+
+            }
+
+            //main data
+            function cleanDataset(rawData) {
+                const brandMap = {
+                    Nintendo: ['NES', 'SNES', 'N64', 'GC', 'Wii', 'WiiU', 'NS', 'GB', 'GBC', 'GBA', 'DS', 'DSi', 'DSiW', '3DS', 'VB', 'iQue', 'VC'],
+                    Sony: ['PS', 'PS2', 'PS3', 'PS4', 'PS5', 'PSP', 'PSV', 'PSN'],
+                    Microsoft: ['XB', 'X360', 'Xone', 'XSX', 'Series', 'XBL'],
+                    Apple: ['Apll', 'OSX', 'iOS'],
+                    PC: ['PC'],
+                    Mobile: ['Mob', 'WinP', 'And', 'Linus', 'Ouya', 'NGage', 'WW'],
+                    Cartridge: ['C64', 'C128', 'Amig', 'CD32', 'CDi', 'GEN', 'SAT', 'SCD', 'S32X', 'GG', 'BRW', 'DC', '2600', '5200', '7800', 'Lynx', 'AJ']
+                }
+
+                gBrandMap = brandMap
+
+                const brandPricing = {
+                    Nintendo: 55,
+                    Sony: 65,
+                    Microsoft: 65,
+                    PC: 15.5,
+                    Apple: 6,
+                    Mobile: 3,
+                    Cartridge: 40,
+                    Other: 40
+                }//assuming price based on "console"
+
+                function assignBrand(console) {
+                    for (const [brand, consoles] of Object.entries(brandMap)) {
+                    if (consoles.includes(console)) return brand
+                    }
+                    return 'Other'
+                }
+
+                return rawData.map(d => {
+                    const releaseYear = d.release_date ? new Date(d.release_date).getFullYear() : null
+                    const total_sales = (
+                        (+d.na_sales || 0) +
+                        (+d.jp_sales || 0) +
+                        (+d.pal_sales || 0) +
+                        (+d.other_sales || 0)
+                    )//total sales
+
+                    const brand = assignBrand(d.console)
+                    const avgPrice = brandPricing[brand] || 40
+                    const assumed_revenue_generated = total_sales * avgPrice
+
+                    return {
+                        title: d.title || '',
+                        console: d.console || '',
+                        brand: brand,
+                        genre: d.genre || '',
+                        publisher: d.publisher || '',
+                        developer: d.developer || '',
+                        release_year: releaseYear,
+                        total_shipped: +d.total_shipped || 0,
+                        total_sales: total_sales,
+                        assumed_revenue_generated: assumed_revenue_generated
+                    }
+                })
+            }
+        
+
+
+        </script>
+        <!--Interactions: Decades, in-depth analysis-->
+        <script src="interaction01.js"></script>
+
+
+    </body>
+</html>
